@@ -54,16 +54,16 @@
 ### 1.1 Context
 
 
-High-energy physics experiments such as those operated at the Large Hadron Collider (LHC) fundamentally rely on detailed and realistic simulations of particle interactions with the detector. This is a computationally expensive task, and with future detectors becoming more granular, this problem may get worse. Generative model-based simulations are in production to tackle this, but due to future high granularity detectors, training such models at scale while preserving calorimetric observables requires compact, accurate and detector geometry independent data representation
+High-energy physics experiments such as those operated at the Large Hadron Collider (LHC) fundamentally rely on detailed and realistic simulations of particle interactions with the detector. This is a computationally expensive task, and with future detectors becoming more granular, this problem may get worse. Generative model-based simulations are in production to tackle this, but due to future high granularity detectors, training such models at scale while preserving calorimetric observables requires compact, accurate and detector readout geometry independent data representation.
 
 
 ### 1.2 Problem
 
 
-Geant4 exposes individual calorimeter **steps** (numerous, geometry‑agnostic). Retaining all steps is too computationally costly for training generative fast simulation models.
+Geant4 records the individual **energy-loss steps** taken by particles in the calorimeter. Retaining all steps is too computationally costly for training generative fast simulation models.
 
 
-**Goal**: Given Geant4 steps for an event, construct a **compact point cloud** that:
+**Goal**: Given Geant4 steps for an event, construct a  readout geometry independent **compact point cloud** that:
 - **greatly reduces** step count
 - **preserves** calorimetric observables (longitudinal/radial profiles, step energy profiles, first/second moments, total energy).
 
@@ -105,7 +105,7 @@ I have implemented three different clustering strategies:
 
 
 #### Design
-DBSCAN is a classical density-based method with two main parameters: a neighbourhood radius (epsilon) and a minimum neighbour count (min_samples). Because calorimeter showers develop along an axis (shower axis), with confirmation from my mentor, I ran DBSCAN layer-wise so that DBSCAN is applied to each layer one at a time instead of trying to cluster in a 3d space. This stabilises clustering (longitudinally), but this also means that we are relying on detector geometry, and hence this approach is not detector independent.
+DBSCAN is a classical density-based method with two main parameters: a neighbourhood radius (epsilon) and a minimum neighbour count (min_samples). Because calorimeter showers develop along an axis (shower axis), I ran DBSCAN layer-wise so that DBSCAN is applied to each layer one at a time instead of trying to cluster in a 3D space. This stabilises clustering (longitudinally), but this also means that we are relying on detector geometry, and hence this approach is not detector independent.
 
 
 Layer decoding and grouping: We iterate over event_id → subdetector → layer, where the layer index is decoded from the readout cell identifier as:
@@ -118,7 +118,7 @@ Feature space and metric:  Within each layer, we embed steps in a compact, unitl
 ```
 s = (x', y', t') = (x/5, y/5, (t - median_layer)/1)
 ```
-Distances are Euclidean in this space. Dividing x and y by 5 mm makes them roughly “cell units”; centreing time by the layer median removes global offsets; dividing by 1 ns keeps numbers well scaled. This scaling allows us to include time in the distance metric and also makes a single epsilon reasonably transferable across layers.
+Distances are Euclidean in this space. Dividing x and y by 5 mm makes them roughly “cell units”; centering time by the layer median removes global offsets; dividing by 1 ns keeps numbers well scaled. This scaling allows us to include time in the distance metric and also makes a single epsilon reasonably transferable across layers.
 
 
 **Standard DBSCAN pass:**  For a given epsilon (eps_scaled) and min_samples, a step is a core if it has at least min_samples neighbours within epsilon in each layer. Border points attach to reachable cores; points that are not density-reachable are labelled noise (-1). Cluster labels are then offset so they remain unique across the whole event.
@@ -130,7 +130,7 @@ Distances are Euclidean in this space. Dividing x and y by 5 mm makes them rough
 - Compute an energy-weighted transverse centroid in the layer and energy-weighted distances r_i in (x,y).
 
 
-- Find a quantile radius R_q that encloses an energy fraction q (default about 0.68). Hits with r <= R_q are tagged core; the rest are tail.
+- Find a quantile radius R_q that encloses an energy fraction q (default about 0.68). Steps with r <= R_q are tagged core; the rest are tail.
 
 
 - Run DBSCAN twice: with a larger epsilon on the core set (eps_core = k_core * eps_scaled, e.g., k_core ≈ 1.8) and a smaller epsilon on the tail set (eps_tail = k_tail * eps_scaled, e.g., k_tail ≈ 0.6), keeping min_samples fixed.
@@ -145,7 +145,7 @@ Distances are Euclidean in this space. Dividing x and y by 5 mm makes them rough
 After labelling, each cluster (label ≥ 0) is reduced to a single representative point with:
 
 
-- Position: energy-weighted 3D centroid of its member hits (computed back in physical x,y,z),
+- Position: energy-weighted 3D centroid of its member steps (computed back in physical x,y,z),
 - Energy: sum over member energies,
 - Time: minimum time
 
@@ -239,7 +239,7 @@ Fallback guarantee: If there are labelled followers but no seeds, promote the po
 **Reduction to a point cloud.** For each non-outlier cluster:
 
 
-- Position: energy-weighted 3D centroid of constituent hits (computed back in physical (x,y,z)),
+- Position: energy-weighted 3D centroid of constituent steps (computed back in physical (x,y,z)),
 - Energy: sum of member energies,
 - Time: minimum time
 
@@ -255,7 +255,7 @@ Fallback guarantee: If there are labelled followers but no seeds, promote the po
 
 
 * **Longitudinal**: more stable than DBSCAN (typical core shift ≲ **1 mm**), but non‑zero.
-* **Radial**: **persistent degradation** across reasonable `(dc, rhoc, deltac)`; larger `dc` worsens tails by **several mm**; smaller `dc` fragments. **Outlier pruning** tuned for energy‑weighted hits can drop legitimate **step‑level** tails → **energy loss**.
+* **Radial**: **persistent degradation** across reasonable `(dc, rhoc, deltac)`; larger `dc` worsens tails by **several mm**; smaller `dc` fragments. **Outlier pruning** tuned for energy‑weighted steps can drop legitimate **step‑level** tails → **energy loss**.
 * **Performance**: \~**0.25 event/s** (≈4 s/event).
 * **Detector/angle dependence**: per‑layer `(x,y)` without axis transform → **not** angle‑robust or detector‑independent.
 
@@ -277,10 +277,10 @@ python clue_based.py INPUT.h5 \
 
 
 #### Design
-After DBSCAN’s ε‑sensitivity and CLUE’s radial tail erosion in a detector‑layer frame, I designed a geometry‑agnostic, angle‑robust alternative with explicit geometric control. The method works in a natural shower frame derived from the steps and then applies a fixed grid per axis‑aligned pseudo‑layer. This prevents the radius‑driven “inward drag” that occurs when density thresholds bridge across gaps. The overall idea was inspired by the preprocessing stage of the CaloClouds paper, which also projects granular grids onto each layer.
+After DBSCAN’s ε‑sensitivity and CLUE’s radial tail erosion in a detector‑layer frame, I designed a geometry‑agnostic, angle‑robust alternative with explicit geometric control. The method works in a shower intrinsic shower frame derived from the steps and then applies a fixed grid per axis‑aligned pseudo‑layer. This prevents the radius‑driven “inward drag” that occurs when density thresholds bridge across gaps. The overall idea was inspired by the preprocessing stage of the CaloClouds paper, which also projects granular grids onto each layer.
 
 
-**natural frame via energy‑weighted PCA**
+**shower intrinsic frame via energy‑weighted PCA**
 
 
 For each event, we estimate a robust shower axis from the top energy quantile (default ≈70%) to make sure that the shower axis is not skewed by outliers
@@ -293,7 +293,7 @@ For each event, we estimate a robust shower axis from the top energy quantile (d
 The principal eigenvector of C is the axis a. Choose ```e1 ⟂ a```  and set ```e2 = a × e1``` to form a right‑handed basis {a, e1, e2}.
 
 
-Project hits: ```w = (x − O)·a, u = (x − O)·e1, v = (x − O)·e2```
+Project steps: ```w = (x − O)·a, u = (x − O)·e1, v = (x − O)·e2```
 
 
 This alignment uses only step positions and energies, where no layer information or detector geometry is required, so it is detector‑independent and angle‑robust by construction.
@@ -363,7 +363,7 @@ For each cell (no CCL) or merged component:
 * At **3 mm**, shapes remain **very good** with stronger compression; at **10 mm**, visible degradation appears (core shift, radial distortion), but deviations remain **sub‑cell** compared to a \~**5 mm** readout pitch.
 * **CCL4** on top of 0.85 mm: **extra compression** at **minimal cost**; **CCL8** compresses more but starts to harm cores/tails → choose **CCL4** when fidelity is priority.
 * **Throughput**: **\~3–4 events/s** (fastest).
-* **Detector independence & angle robustness**: uses only hits to define the axis and slices along it; behaviour is unchanged under incident‑angle and readout changes.
+* **Detector independence & angle robustness**: uses only steps to define the axis and slices along it; behaviour is unchanged under incident‑angle and readout changes.
 
 
 #### Testing on different angles
